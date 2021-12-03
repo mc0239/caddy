@@ -1,4 +1,4 @@
-// Copyright 2015 Light Code Labs, LLC
+// Copyright 2015 Matthew Holt and The Caddy Authors
 //
 // Licensed under the Apache License, Version 2.0 (the "License");
 // you may not use this file except in compliance with the License.
@@ -35,9 +35,11 @@ type (
 
 	// Token represents a single parsable unit.
 	Token struct {
-		File string
-		Line int
-		Text string
+		File        string
+		Line        int
+		Text        string
+		inSnippet   bool
+		snippetName string
 	}
 )
 

@@ -24,10 +24,11 @@ import (
 	"time"
 
 	"github.com/caddyserver/caddy/v2"
+	"github.com/caddyserver/caddy/v2/modules/caddyhttp"
 	"github.com/dustin/go-humanize"
 )
 
-func (fsrv *FileServer) directoryListing(files []os.FileInfo, canGoUp bool, root, urlPath string, repl *caddy.Replacer) browseListing {
+func (fsrv *FileServer) directoryListing(files []os.FileInfo, canGoUp bool, root, urlPath string, repl *caddy.Replacer) browseTemplateContext {
 	filesToHide := fsrv.transformHidePaths(repl)
 
 	var dirCount, fileCount int
@@ -42,28 +43,43 @@ func (fsrv *FileServer) directoryListing(files []os.FileInfo, canGoUp bool, root
 
 		isDir := f.IsDir() || isSymlinkTargetDir(f, root, urlPath)
 
+		u := url.URL{Path: url.PathEscape(name)}
+
+		// add the slash after the escape of path to avoid escaping the slash as well
 		if isDir {
-			name += "/"
+			u.Path += "/"
 			dirCount++
 		} else {
 			fileCount++
 		}
 
-		u := url.URL{Path: "./" + name} // prepend with "./" to fix paths with ':' in the name
+		size := f.Size()
+		fileIsSymlink := isSymlink(f)
+		if fileIsSymlink {
+			path := caddyhttp.SanitizedPathJoin(root, path.Join(urlPath, f.Name()))
+			fileInfo, err := os.Stat(path)
+			if err == nil {
+				size = fileInfo.Size()
+			}
+			// An error most likely means the symlink target doesn't exist,
+			// which isn't entirely unusual and shouldn't fail the listing.
+			// In this case, just use the size of the symlink itself, which
+			// was already set above.
+		}
 
 		fileInfos = append(fileInfos, fileInfo{
 			IsDir:     isDir,
-			IsSymlink: isSymlink(f),
-			Name:      f.Name(),
-			Size:      f.Size(),
+			IsSymlink: fileIsSymlink,
+			Name:      name,
+			Size:      size,
 			URL:       u.String(),
 			ModTime:   f.ModTime().UTC(),
 			Mode:      f.Mode(),
 		})
 	}
-
-	return browseListing{
-		Name:     path.Base(urlPath),
+	name, _ := url.PathUnescape(urlPath)
+	return browseTemplateContext{
+		Name:     path.Base(name),
 		Path:     urlPath,
 		CanGoUp:  canGoUp,
 		Items:    fileInfos,
@@ -72,7 +88,8 @@ func (fsrv *FileServer) directoryListing(files []os.FileInfo, canGoUp bool, root
 	}
 }
 
-type browseListing struct {
+// browseTemplateContext provides the template context for directory listings.
+type browseTemplateContext struct {
 	// The name of the directory (the last element of the path).
 	Name string `json:"name"`
 
@@ -106,7 +123,7 @@ type browseListing struct {
 
 // Breadcrumbs returns l.Path where every element maps
 // the link to the text to display.
-func (l browseListing) Breadcrumbs() []crumb {
+func (l browseTemplateContext) Breadcrumbs() []crumb {
 	if len(l.Path) == 0 {
 		return []crumb{}
 	}
@@ -116,13 +133,16 @@ func (l browseListing) Breadcrumbs() []crumb {
 	if lpath[len(lpath)-1] == '/' {
 		lpath = lpath[:len(lpath)-1]
 	}
-
 	parts := strings.Split(lpath, "/")
 	result := make([]crumb, len(parts))
 	for i, p := range parts {
 		if i == 0 && p == "" {
 			p = "/"
 		}
+		// the directory name could include an encoded slash in its path,
+		// so the item name should be unescaped in the loop rather than unescaping the
+		// entire path outside the loop.
+		p, _ = url.PathUnescape(p)
 		lnk := strings.Repeat("../", len(parts)-i-1)
 		result[i] = crumb{Link: lnk, Text: p}
 	}
@@ -130,7 +150,7 @@ func (l browseListing) Breadcrumbs() []crumb {
 	return result
 }
 
-func (l *browseListing) applySortAndLimit(sortParam, orderParam, limitParam string, offsetParam string) {
+func (l *browseTemplateContext) applySortAndLimit(sortParam, orderParam, limitParam string, offsetParam string) {
 	l.Sort = sortParam
 	l.Order = orderParam
 
@@ -207,10 +227,12 @@ func (fi fileInfo) HumanModTime(format string) string {
 	return fi.ModTime.Format(format)
 }
 
-type byName browseListing
-type byNameDirFirst browseListing
-type bySize browseListing
-type byTime browseListing
+type (
+	byName         browseTemplateContext
+	byNameDirFirst browseTemplateContext
+	bySize         browseTemplateContext
+	byTime         browseTemplateContext
+)
 
 func (l byName) Len() int      { return len(l.Items) }
 func (l byName) Swap(i, j int) { l.Items[i], l.Items[j] = l.Items[j], l.Items[i] }
@@ -261,7 +283,7 @@ func (l byTime) Less(i, j int) bool { return l.Items[i].ModTime.Before(l.Items[j
 
 const (
 	sortByName         = "name"
-	sortByNameDirFirst = "name_dir_first"
+	sortByNameDirFirst = "namedirfirst"
 	sortBySize         = "size"
 	sortByTime         = "time"
 )

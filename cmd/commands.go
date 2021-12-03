@@ -61,6 +61,12 @@ type Command struct {
 // any error that occurred.
 type CommandFunc func(Flags) (int, error)
 
+// Commands returns a list of commands initialised by
+// RegisterCommand
+func Commands() map[string]Command {
+	return commands
+}
+
 var commands = make(map[string]Command)
 
 func init() {
@@ -74,11 +80,14 @@ func init() {
 	RegisterCommand(Command{
 		Name:  "start",
 		Func:  cmdStart,
-		Usage: "[--config <path> [--adapter <name>]] [--watch] [--pidfile <file>]",
+		Usage: "[--config <path> [--adapter <name>]] [--envfile <path>] [--watch] [--pidfile <file>]",
 		Short: "Starts the Caddy process in the background and then returns",
 		Long: `
 Starts the Caddy process, optionally bootstrapped with an initial config file.
 This command unblocks after the server starts running or fails to run.
+
+If --envfile is specified, an environment file with environment variables in
+the KEY=VALUE format will be loaded into the Caddy process.
 
 On Windows, the spawned child process will remain attached to the terminal, so
 closing the window will forcefully stop Caddy; to avoid forgetting this, try
@@ -86,6 +95,7 @@ using 'caddy run' instead to keep it in the foreground.`,
 		Flags: func() *flag.FlagSet {
 			fs := flag.NewFlagSet("start", flag.ExitOnError)
 			fs.String("config", "", "Configuration file")
+			fs.String("envfile", "", "Environment file to load")
 			fs.String("adapter", "", "Name of config adapter to apply")
 			fs.String("pidfile", "", "Path of file to which to write process ID")
 			fs.Bool("watch", false, "Reload changed config file automatically")
@@ -178,6 +188,7 @@ config file; otherwise the default is assumed.`,
 			fs.String("config", "", "Configuration file (required)")
 			fs.String("adapter", "", "Name of config adapter to apply")
 			fs.String("address", "", "Address of the administration listener, if different from config")
+			fs.Bool("force", false, "Force config reload, even if it is the same")
 			return fs
 		}(),
 	})
@@ -191,11 +202,13 @@ config file; otherwise the default is assumed.`,
 	RegisterCommand(Command{
 		Name:  "list-modules",
 		Func:  cmdListModules,
-		Usage: "[--versions]",
+		Usage: "[--packages] [--versions]",
 		Short: "Lists the installed Caddy modules",
 		Flags: func() *flag.FlagSet {
 			fs := flag.NewFlagSet("list-modules", flag.ExitOnError)
+			fs.Bool("packages", false, "Print package paths")
 			fs.Bool("versions", false, "Print version information")
+			fs.Bool("skip-standard", false, "Skip printing standard modules")
 			return fs
 		}(),
 	})
@@ -247,7 +260,7 @@ Loads and provisions the provided config, but does not start running it.
 This reveals any errors with the configuration through the loading and
 provisioning stages.`,
 		Flags: func() *flag.FlagSet {
-			fs := flag.NewFlagSet("load", flag.ExitOnError)
+			fs := flag.NewFlagSet("validate", flag.ExitOnError)
 			fs.String("config", "", "Input configuration file")
 			fs.String("adapter", "", "Name of config adapter")
 			return fs
@@ -270,8 +283,56 @@ If you wish you use stdin instead of a regular file, use - as the path.
 When reading from stdin, the --overwrite flag has no effect: the result
 is always printed to stdout.`,
 		Flags: func() *flag.FlagSet {
-			fs := flag.NewFlagSet("format", flag.ExitOnError)
+			fs := flag.NewFlagSet("fmt", flag.ExitOnError)
 			fs.Bool("overwrite", false, "Overwrite the input file with the results")
+			return fs
+		}(),
+	})
+
+	RegisterCommand(Command{
+		Name:  "upgrade",
+		Func:  cmdUpgrade,
+		Short: "Upgrade Caddy (EXPERIMENTAL)",
+		Long: `
+Downloads an updated Caddy binary with the same modules/plugins at the
+latest versions. EXPERIMENTAL: May be changed or removed.`,
+		Flags: func() *flag.FlagSet {
+			fs := flag.NewFlagSet("upgrade", flag.ExitOnError)
+			fs.Bool("keep-backup", false, "Keep the backed up binary, instead of deleting it")
+			return fs
+		}(),
+	})
+
+	RegisterCommand(Command{
+		Name:  "add-package",
+		Func:  cmdAddPackage,
+		Usage: "<packages...>",
+		Short: "Adds Caddy packages (EXPERIMENTAL)",
+		Long: `
+Downloads an updated Caddy binary with the specified packages (module/plugin)
+added. Retains existing packages. Returns an error if the any of packages are 
+already included. EXPERIMENTAL: May be changed or removed.
+`,
+		Flags: func() *flag.FlagSet {
+			fs := flag.NewFlagSet("add-package", flag.ExitOnError)
+			fs.Bool("keep-backup", false, "Keep the backed up binary, instead of deleting it")
+			return fs
+		}(),
+	})
+
+	RegisterCommand(Command{
+		Name:  "remove-package",
+		Func:  cmdRemovePackage,
+		Usage: "<packages...>",
+		Short: "Removes Caddy packages (EXPERIMENTAL)",
+		Long: `
+Downloads an updated Caddy binaries without the specified packages (module/plugin). 
+Returns an error if any of the packages are not included. 
+EXPERIMENTAL: May be changed or removed.
+`,
+		Flags: func() *flag.FlagSet {
+			fs := flag.NewFlagSet("remove-package", flag.ExitOnError)
+			fs.Bool("keep-backup", false, "Keep the backed up binary, instead of deleting it")
 			return fs
 		}(),
 	})

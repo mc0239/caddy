@@ -1,4 +1,4 @@
-// Copyright 2015 Light Code Labs, LLC
+// Copyright 2015 Matthew Holt and The Caddy Authors
 //
 // Licensed under the Apache License, Version 2.0 (the "License");
 // you may not use this file except in compliance with the License.
@@ -16,7 +16,6 @@ package caddyfile
 
 import (
 	"bytes"
-	"io/ioutil"
 	"os"
 	"path/filepath"
 	"testing"
@@ -160,6 +159,10 @@ func TestParseOneAndImport(t *testing.T) {
 			"localhost",
 		}, []int{}},
 
+		{`localhost{
+		    dir1
+		  }`, true, []string{}, []int{}},
+
 		{`localhost
 		  dir1 {
 		    nested {
@@ -276,7 +279,7 @@ func TestRecursiveImport(t *testing.T) {
 	}
 
 	// test relative recursive import
-	err = ioutil.WriteFile(recursiveFile1, []byte(
+	err = os.WriteFile(recursiveFile1, []byte(
 		`localhost
 		dir1
 		import recursive_import_test2`), 0644)
@@ -285,7 +288,7 @@ func TestRecursiveImport(t *testing.T) {
 	}
 	defer os.Remove(recursiveFile1)
 
-	err = ioutil.WriteFile(recursiveFile2, []byte("dir2 1"), 0644)
+	err = os.WriteFile(recursiveFile2, []byte("dir2 1"), 0644)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -310,7 +313,7 @@ func TestRecursiveImport(t *testing.T) {
 	}
 
 	// test absolute recursive import
-	err = ioutil.WriteFile(recursiveFile1, []byte(
+	err = os.WriteFile(recursiveFile1, []byte(
 		`localhost
 		dir1
 		import `+recursiveFile2), 0644)
@@ -366,7 +369,7 @@ func TestDirectiveImport(t *testing.T) {
 		t.Fatal(err)
 	}
 
-	err = ioutil.WriteFile(directiveFile, []byte(`prop1 1
+	err = os.WriteFile(directiveFile, []byte(`prop1 1
 	prop2 2`), 0644)
 	if err != nil {
 		t.Fatal(err)
@@ -444,6 +447,28 @@ func TestParseAll(t *testing.T) {
 
 		{`import notfound/*`, false, [][]string{}},        // glob needn't error with no matches
 		{`import notfound/file.conf`, true, [][]string{}}, // but a specific file should
+
+		// recursive self-import
+		{`import testdata/import_recursive0.txt`, true, [][]string{}},
+		{`import testdata/import_recursive3.txt
+		import testdata/import_recursive1.txt`, true, [][]string{}},
+
+		// cyclic imports
+		{`(A) {
+			import A
+		}
+		:80
+		import A
+		`, true, [][]string{}},
+		{`(A) {
+			import B
+		}
+		(B) {
+			import A
+		}
+		:80
+		import A
+		`, true, [][]string{}},
 	} {
 		p := testParser(test.input)
 		blocks, err := p.parseAll()
@@ -607,7 +632,7 @@ func TestSnippets(t *testing.T) {
 }
 
 func writeStringToTempFileOrDie(t *testing.T, str string) (pathToFile string) {
-	file, err := ioutil.TempFile("", t.Name())
+	file, err := os.CreateTemp("", t.Name())
 	if err != nil {
 		panic(err) // get a stack trace so we know where this was called from.
 	}

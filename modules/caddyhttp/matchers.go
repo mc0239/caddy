@@ -21,9 +21,11 @@ import (
 	"net/http"
 	"net/textproto"
 	"net/url"
+	"path"
 	"path/filepath"
 	"regexp"
 	"sort"
+	"strconv"
 	"strings"
 
 	"github.com/caddyserver/caddy/v2"
@@ -81,10 +83,23 @@ type (
 	// MatchMethod matches requests by the method.
 	MatchMethod []string
 
-	// MatchQuery matches requests by URI's query string.
+	// MatchQuery matches requests by the URI's query string. It takes a JSON object
+	// keyed by the query keys, with an array of string values to match for that key.
+	// Query key matches are exact, but wildcards may be used for value matches. Both
+	// keys and values may be placeholders.
+	// An example of the structure to match `?key=value&topic=api&query=something` is:
+	//
+	// ```json
+	// {
+	// 	"key": ["value"],
+	//	"topic": ["api"],
+	//	"query": ["*"]
+	// }
+	// ```
 	MatchQuery url.Values
 
-	// MatchHeader matches requests by header fields. It performs fast,
+	// MatchHeader matches requests by header fields. The key is the field
+	// name and the array is the list of field values. It performs fast,
 	// exact string comparisons of the field values. Fast prefix, suffix,
 	// and substring matches can also be done by suffixing, prefixing, or
 	// surrounding the value with the wildcard `*` character, respectively.
@@ -101,7 +116,8 @@ type (
 	// (potentially leading to collisions).
 	MatchHeaderRE map[string]*MatchRegexp
 
-	// MatchProtocol matches requests by protocol.
+	// MatchProtocol matches requests by protocol. Recognized values are
+	// "http", "https", and "grpc".
 	MatchProtocol string
 
 	// MatchRemoteIP matches requests by client IP (or CIDR range).
@@ -126,9 +142,9 @@ type (
 	// matchers within a set work the same (i.e. different matchers in
 	// the same set are AND'ed).
 	//
-	// Note that the generated docs which describe the structure of
-	// this module are wrong because of how this type unmarshals JSON
-	// in a custom way. The correct structure is:
+	// NOTE: The generated docs which describe the structure of this
+	// module are wrong because of how this type unmarshals JSON in a
+	// custom way. The correct structure is:
 	//
 	// ```json
 	// [
@@ -299,7 +315,15 @@ func (m MatchPath) Provision(_ caddy.Context) error {
 
 // Match returns true if r matches m.
 func (m MatchPath) Match(r *http.Request) bool {
-	lowerPath := strings.ToLower(r.URL.Path)
+	// PathUnescape returns an error if the escapes aren't
+	// well-formed, meaning the count % matches the RFC.
+	// Return early if the escape is improper.
+	unescapedPath, err := url.PathUnescape(r.URL.Path)
+	if err != nil {
+		return false
+	}
+
+	lowerPath := strings.ToLower(unescapedPath)
 
 	// see #2917; Windows ignores trailing dots and spaces
 	// when accessing files (sigh), potentially causing a
@@ -307,6 +331,16 @@ func (m MatchPath) Match(r *http.Request) bool {
 	// as static files, exposing the source code, instead of
 	// being matched by *.php to be treated as PHP scripts
 	lowerPath = strings.TrimRight(lowerPath, ". ")
+
+	// Clean the path, merges doubled slashes, etc.
+	// This ensures maliciously crafted requests can't bypass
+	// the path matcher. See #4407
+	lowerPath = path.Clean(lowerPath)
+
+	// Cleaning may remove the trailing slash, but we want to keep it
+	if lowerPath != "/" && strings.HasSuffix(r.URL.Path, "/") {
+		lowerPath = lowerPath + "/"
+	}
 
 	repl := r.Context().Value(caddy.ReplacerCtxKey).(*caddy.Replacer)
 
@@ -381,7 +415,26 @@ func (MatchPathRE) CaddyModule() caddy.ModuleInfo {
 // Match returns true if r matches m.
 func (m MatchPathRE) Match(r *http.Request) bool {
 	repl := r.Context().Value(caddy.ReplacerCtxKey).(*caddy.Replacer)
-	return m.MatchRegexp.Match(r.URL.Path, repl)
+
+	// PathUnescape returns an error if the escapes aren't
+	// well-formed, meaning the count % matches the RFC.
+	// Return early if the escape is improper.
+	unescapedPath, err := url.PathUnescape(r.URL.Path)
+	if err != nil {
+		return false
+	}
+
+	// Clean the path, merges doubled slashes, etc.
+	// This ensures maliciously crafted requests can't bypass
+	// the path matcher. See #4407
+	cleanedPath := path.Clean(unescapedPath)
+
+	// Cleaning may remove the trailing slash, but we want to keep it
+	if cleanedPath != "/" && strings.HasSuffix(r.URL.Path, "/") {
+		cleanedPath = cleanedPath + "/"
+	}
+
+	return m.MatchRegexp.Match(cleanedPath, repl)
 }
 
 // CaddyModule returns the Caddy module information.
@@ -513,7 +566,8 @@ func (m *MatchHeader) UnmarshalCaddyfile(d *caddyfile.Dispenser) error {
 
 // Match returns true if r matches m.
 func (m MatchHeader) Match(r *http.Request) bool {
-	return matchHeaders(r.Header, http.Header(m), r.Host)
+	repl := r.Context().Value(caddy.ReplacerCtxKey).(*caddy.Replacer)
+	return matchHeaders(r.Header, http.Header(m), r.Host, repl)
 }
 
 // getHeaderFieldVals returns the field values for the given fieldName from input.
@@ -530,7 +584,7 @@ func getHeaderFieldVals(input http.Header, fieldName, host string) []string {
 // matchHeaders returns true if input matches the criteria in against without regex.
 // The host parameter should be obtained from the http.Request.Host field since
 // net/http removes it from the header map.
-func matchHeaders(input, against http.Header, host string) bool {
+func matchHeaders(input, against http.Header, host string, repl *caddy.Replacer) bool {
 	for field, allowedFieldVals := range against {
 		actualFieldVals := getHeaderFieldVals(input, field, host)
 		if allowedFieldVals != nil && len(allowedFieldVals) == 0 && actualFieldVals != nil {
@@ -546,6 +600,9 @@ func matchHeaders(input, against http.Header, host string) bool {
 	fieldVals:
 		for _, actualFieldVal := range actualFieldVals {
 			for _, allowedFieldVal := range allowedFieldVals {
+				if repl != nil {
+					allowedFieldVal = repl.ReplaceAll(allowedFieldVal, "")
+				}
 				switch {
 				case allowedFieldVal == "*":
 					match = true
@@ -662,7 +719,7 @@ func (MatchProtocol) CaddyModule() caddy.ModuleInfo {
 func (m MatchProtocol) Match(r *http.Request) bool {
 	switch string(m) {
 	case "grpc":
-		return r.Header.Get("content-type") == "application/grpc"
+		return strings.HasPrefix(r.Header.Get("content-type"), "application/grpc")
 	case "https":
 		return r.TLS != nil
 	case "http":
@@ -931,14 +988,14 @@ func (mre *MatchRegexp) Match(input string, repl *caddy.Replacer) bool {
 
 	// save all capture groups, first by index
 	for i, match := range matches {
-		key := fmt.Sprintf("%s.%d", mre.phPrefix, i)
+		key := mre.phPrefix + "." + strconv.Itoa(i)
 		repl.Set(key, match)
 	}
 
 	// then by name
 	for i, name := range mre.compiled.SubexpNames() {
 		if i != 0 && name != "" {
-			key := fmt.Sprintf("%s.%s", mre.phPrefix, name)
+			key := mre.phPrefix + "." + name
 			repl.Set(key, matches[i])
 		}
 	}
@@ -966,43 +1023,15 @@ func (mre *MatchRegexp) UnmarshalCaddyfile(d *caddyfile.Dispenser) error {
 	return nil
 }
 
-// ResponseMatcher is a type which can determine if an
-// HTTP response matches some criteria.
-type ResponseMatcher struct {
-	// If set, one of these status codes would be required.
-	// A one-digit status can be used to represent all codes
-	// in that class (e.g. 3 for all 3xx codes).
-	StatusCode []int `json:"status_code,omitempty"`
-
-	// If set, each header specified must be one of the
-	// specified values, with the same logic used by the
-	// request header matcher.
-	Headers http.Header `json:"headers,omitempty"`
-}
-
-// Match returns true if the given statusCode and hdr match rm.
-func (rm ResponseMatcher) Match(statusCode int, hdr http.Header) bool {
-	if !rm.matchStatusCode(statusCode) {
-		return false
-	}
-	return matchHeaders(hdr, rm.Headers, "")
-}
-
-func (rm ResponseMatcher) matchStatusCode(statusCode int) bool {
-	if rm.StatusCode == nil {
-		return true
-	}
-	for _, code := range rm.StatusCode {
-		if StatusCodeMatches(statusCode, code) {
-			return true
-		}
-	}
-	return false
-}
-
 var wordRE = regexp.MustCompile(`\w+`)
 
 const regexpPlaceholderPrefix = "http.regexp"
+
+// MatcherErrorVarKey is the key used for the variable that
+// holds an optional error emitted from a request matcher,
+// to short-circuit the handler chain, since matchers cannot
+// return errors via the RequestMatcher interface.
+const MatcherErrorVarKey = "matchers.error"
 
 // Interface guards
 var (

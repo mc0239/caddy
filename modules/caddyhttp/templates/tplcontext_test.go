@@ -12,24 +12,11 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
-// Copyright 2015 Light Code Labs, LLC
-//
-// Licensed under the Apache License, Version 2.0 (the "License");
-// you may not use this file except in compliance with the License.
-// You may obtain a copy of the License at
-//
-//     http://www.apache.org/licenses/LICENSE-2.0
-//
-// Unless required by applicable law or agreed to in writing, software
-// distributed under the License is distributed on an "AS IS" BASIS,
-// WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
-// See the License for the specific language governing permissions and
-// limitations under the License.
-
 package templates
 
 import (
 	"bytes"
+	"context"
 	"fmt"
 	"io/ioutil"
 	"net/http"
@@ -40,10 +27,49 @@ import (
 	"strings"
 	"testing"
 	"time"
+
+	"github.com/caddyserver/caddy/v2/modules/caddyhttp"
 )
 
+type handle struct {
+}
+
+func (h *handle) ServeHTTP(w http.ResponseWriter, r *http.Request) {
+	if r.Header.Get("Accept-Encoding") == "identity" {
+		w.Write([]byte("good contents"))
+	} else {
+		w.Write([]byte("bad cause Accept-Encoding: " + r.Header.Get("Accept-Encoding")))
+	}
+}
+
+func TestHTTPInclude(t *testing.T) {
+	tplContext := getContextOrFail(t)
+	for i, test := range []struct {
+		uri     string
+		handler *handle
+		expect  string
+	}{
+		{
+			uri:     "https://example.com/foo/bar",
+			handler: &handle{},
+			expect:  "good contents",
+		},
+	} {
+		ctx := context.WithValue(tplContext.Req.Context(), caddyhttp.ServerCtxKey, test.handler)
+		tplContext.Req = tplContext.Req.WithContext(ctx)
+		tplContext.Req.Header.Add("Accept-Encoding", "gzip")
+		result, err := tplContext.funcHTTPInclude(test.uri)
+		if result != test.expect {
+			t.Errorf("Test %d: expected '%s' but got '%s'", i, test.expect, result)
+		}
+		if err != nil {
+			t.Errorf("Test %d: got error: %v", i, result)
+		}
+	}
+}
+
 func TestMarkdown(t *testing.T) {
-	context := getContextOrFail(t)
+	tplContext := getContextOrFail(t)
 
 	for i, test := range []struct {
 		body   string
@@ -54,7 +80,7 @@ func TestMarkdown(t *testing.T) {
 			expect: "<ul>\n<li>str1</li>\n<li>str2</li>\n</ul>\n",
 		},
 	} {
-		result, err := context.funcMarkdown(test.body)
+		result, err := tplContext.funcMarkdown(test.body)
 		if result != test.expect {
 			t.Errorf("Test %d: expected '%s' but got '%s'", i, test.expect, result)
 		}
@@ -95,9 +121,9 @@ func TestCookie(t *testing.T) {
 			expect:     "cookieValue",
 		},
 	} {
-		context := getContextOrFail(t)
-		context.Req.AddCookie(test.cookie)
-		actual := context.Cookie(test.cookieName)
+		tplContext := getContextOrFail(t)
+		tplContext.Req.AddCookie(test.cookie)
+		actual := tplContext.Cookie(test.cookieName)
 		if actual != test.expect {
 			t.Errorf("Test %d: Expected cookie value '%s' but got '%s' for cookie with name '%s'",
 				i, test.expect, actual, test.cookieName)
@@ -105,13 +131,236 @@ func TestCookie(t *testing.T) {
 	}
 }
 
+func TestImport(t *testing.T) {
+	for i, test := range []struct {
+		fileContent string
+		fileName    string
+		shouldErr   bool
+		expect      string
+	}{
+		{
+			// file exists, template is defined
+			fileContent: `{{ define "imported" }}text{{end}}`,
+			fileName:    "file1",
+			shouldErr:   false,
+			expect:      `"imported"`,
+		},
+		{
+			// file does not exit
+			fileContent: "",
+			fileName:    "",
+			shouldErr:   true,
+		},
+	} {
+		tplContext := getContextOrFail(t)
+		var absFilePath string
+
+		// create files for test case
+		if test.fileName != "" {
+			absFilePath := filepath.Join(fmt.Sprintf("%s", tplContext.Root), test.fileName)
+			if err := os.WriteFile(absFilePath, []byte(test.fileContent), os.ModePerm); err != nil {
+				os.Remove(absFilePath)
+				t.Fatalf("Test %d: Expected no error creating file, got: '%s'", i, err.Error())
+			}
+		}
+
+		// perform test
+		tplContext.NewTemplate("parent")
+		actual, err := tplContext.funcImport(test.fileName)
+		templateWasDefined := strings.Contains(tplContext.tpl.DefinedTemplates(), test.expect)
+		if err != nil {
+			if !test.shouldErr {
+				t.Errorf("Test %d: Expected no error, got: '%s'", i, err)
+			}
+		} else if test.shouldErr {
+			t.Errorf("Test %d: Expected error but had none", i)
+		} else if !templateWasDefined && actual != "" {
+			// template should be defined, return value should be an empty string
+			t.Errorf("Test %d: Expected template %s to be define but got %s", i, test.expect, tplContext.tpl.DefinedTemplates())
+
+		}
+
+		if absFilePath != "" {
+			if err := os.Remove(absFilePath); err != nil && !os.IsNotExist(err) {
+				t.Fatalf("Test %d: Expected no error removing temporary test file, got: %v", i, err)
+			}
+		}
+	}
+}
+
+func TestNestedInclude(t *testing.T) {
+	for i, test := range []struct {
+		child      string
+		childFile  string
+		parent     string
+		parentFile string
+		shouldErr  bool
+		expect     string
+		child2     string
+		child2File string
+	}{
+		{
+			// include in parent
+			child:      `{{ include "file1" }}`,
+			childFile:  "file0",
+			parent:     `{{ $content := "file2" }}{{ $p := include $content}}`,
+			parentFile: "file1",
+			shouldErr:  false,
+			expect:     ``,
+			child2:     `This shouldn't show`,
+			child2File: "file2",
+		},
+	} {
+		context := getContextOrFail(t)
+		var absFilePath string
+		var absFilePath0 string
+		var absFilePath1 string
+		var buf *bytes.Buffer
+		var err error
+
+		// create files and for test case
+		if test.parentFile != "" {
+			absFilePath = filepath.Join(fmt.Sprintf("%s", context.Root), test.parentFile)
+			if err := ioutil.WriteFile(absFilePath, []byte(test.parent), os.ModePerm); err != nil {
+				os.Remove(absFilePath)
+				t.Fatalf("Test %d: Expected no error creating file, got: '%s'", i, err.Error())
+			}
+		}
+		if test.childFile != "" {
+			absFilePath0 = filepath.Join(fmt.Sprintf("%s", context.Root), test.childFile)
+			if err := ioutil.WriteFile(absFilePath0, []byte(test.child), os.ModePerm); err != nil {
+				os.Remove(absFilePath0)
+				t.Fatalf("Test %d: Expected no error creating file, got: '%s'", i, err.Error())
+			}
+		}
+		if test.child2File != "" {
+			absFilePath1 = filepath.Join(fmt.Sprintf("%s", context.Root), test.child2File)
+			if err := ioutil.WriteFile(absFilePath1, []byte(test.child2), os.ModePerm); err != nil {
+				os.Remove(absFilePath0)
+				t.Fatalf("Test %d: Expected no error creating file, got: '%s'", i, err.Error())
+			}
+		}
+
+		buf = bufPool.Get().(*bytes.Buffer)
+		buf.Reset()
+		defer bufPool.Put(buf)
+		buf.WriteString(test.child)
+		err = context.executeTemplateInBuffer(test.childFile, buf)
+
+		if err != nil {
+			if !test.shouldErr {
+				t.Errorf("Test %d: Expected no error, got: '%s'", i, err)
+			}
+		} else if test.shouldErr {
+			t.Errorf("Test %d: Expected error but had none", i)
+		} else if buf.String() != test.expect {
+			//
+			t.Errorf("Test %d: Expected '%s' but got '%s'", i, test.expect, buf.String())
+
+		}
+
+		if absFilePath != "" {
+			if err := os.Remove(absFilePath); err != nil && !os.IsNotExist(err) {
+				t.Fatalf("Test %d: Expected no error removing temporary test file, got: %v", i, err)
+			}
+		}
+		if absFilePath0 != "" {
+			if err := os.Remove(absFilePath0); err != nil && !os.IsNotExist(err) {
+				t.Fatalf("Test %d: Expected no error removing temporary test file, got: %v", i, err)
+			}
+		}
+		if absFilePath1 != "" {
+			if err := os.Remove(absFilePath1); err != nil && !os.IsNotExist(err) {
+				t.Fatalf("Test %d: Expected no error removing temporary test file, got: %v", i, err)
+			}
+		}
+	}
+}
+
+func TestInclude(t *testing.T) {
+	for i, test := range []struct {
+		fileContent string
+		fileName    string
+		shouldErr   bool
+		expect      string
+		args        string
+	}{
+		{
+			// file exists, content is text only
+			fileContent: "text",
+			fileName:    "file1",
+			shouldErr:   false,
+			expect:      "text",
+		},
+		{
+			// file exists, content is template
+			fileContent: "{{ if . }}text{{ end }}",
+			fileName:    "file1",
+			shouldErr:   false,
+			expect:      "text",
+		},
+		{
+			// file does not exit
+			fileContent: "",
+			fileName:    "",
+			shouldErr:   true,
+		},
+		{
+			// args
+			fileContent: "{{ index .Args 0 }}",
+			fileName:    "file1",
+			shouldErr:   false,
+			args:        "text",
+			expect:      "text",
+		},
+		{
+			// args, reference arg out of range
+			fileContent: "{{ index .Args 1 }}",
+			fileName:    "file1",
+			shouldErr:   true,
+			args:        "text",
+		},
+	} {
+		tplContext := getContextOrFail(t)
+		var absFilePath string
+
+		// create files for test case
+		if test.fileName != "" {
+			absFilePath := filepath.Join(fmt.Sprintf("%s", tplContext.Root), test.fileName)
+			if err := os.WriteFile(absFilePath, []byte(test.fileContent), os.ModePerm); err != nil {
+				os.Remove(absFilePath)
+				t.Fatalf("Test %d: Expected no error creating file, got: '%s'", i, err.Error())
+			}
+		}
+
+		// perform test
+		actual, err := tplContext.funcInclude(test.fileName, test.args)
+		if err != nil {
+			if !test.shouldErr {
+				t.Errorf("Test %d: Expected no error, got: '%s'", i, err)
+			}
+		} else if test.shouldErr {
+			t.Errorf("Test %d: Expected error but had none", i)
+		} else if actual != test.expect {
+			t.Errorf("Test %d: Expected %s but got %s", i, test.expect, actual)
+
+		}
+
+		if absFilePath != "" {
+			if err := os.Remove(absFilePath); err != nil && !os.IsNotExist(err) {
+				t.Fatalf("Test %d: Expected no error removing temporary test file, got: %v", i, err)
+			}
+		}
+	}
+}
+
 func TestCookieMultipleCookies(t *testing.T) {
-	context := getContextOrFail(t)
+	tplContext := getContextOrFail(t)
 
 	cookieNameBase, cookieValueBase := "cookieName", "cookieValue"
 
 	for i := 0; i < 10; i++ {
-		context.Req.AddCookie(&http.Cookie{
+		tplContext.Req.AddCookie(&http.Cookie{
 			Name:  fmt.Sprintf("%s%d", cookieNameBase, i),
 			Value: fmt.Sprintf("%s%d", cookieValueBase, i),
 		})
@@ -119,7 +368,7 @@ func TestCookieMultipleCookies(t *testing.T) {
 
 	for i := 0; i < 10; i++ {
 		expectedCookieVal := fmt.Sprintf("%s%d", cookieValueBase, i)
-		actualCookieVal := context.Cookie(fmt.Sprintf("%s%d", cookieNameBase, i))
+		actualCookieVal := tplContext.Cookie(fmt.Sprintf("%s%d", cookieNameBase, i))
 		if actualCookieVal != expectedCookieVal {
 			t.Errorf("Expected cookie value %s, found %s", expectedCookieVal, actualCookieVal)
 		}
@@ -127,7 +376,7 @@ func TestCookieMultipleCookies(t *testing.T) {
 }
 
 func TestIP(t *testing.T) {
-	context := getContextOrFail(t)
+	tplContext := getContextOrFail(t)
 	for i, test := range []struct {
 		inputRemoteAddr string
 		expect          string
@@ -138,15 +387,15 @@ func TestIP(t *testing.T) {
 		{"[2001:db8:a0b:12f0::1]", "[2001:db8:a0b:12f0::1]"},
 		{`[fe80:1::3%eth0]:44`, `fe80:1::3%eth0`},
 	} {
-		context.Req.RemoteAddr = test.inputRemoteAddr
-		if actual := context.RemoteIP(); actual != test.expect {
+		tplContext.Req.RemoteAddr = test.inputRemoteAddr
+		if actual := tplContext.RemoteIP(); actual != test.expect {
 			t.Errorf("Test %d: Expected %s but got %s", i, test.expect, actual)
 		}
 	}
 }
 
 func TestStripHTML(t *testing.T) {
-	context := getContextOrFail(t)
+	tplContext := getContextOrFail(t)
 
 	for i, test := range []struct {
 		input  string
@@ -183,7 +432,7 @@ func TestStripHTML(t *testing.T) {
 			expect: `<h1hi`,
 		},
 	} {
-		actual := context.funcStripHTML(test.input)
+		actual := tplContext.funcStripHTML(test.input)
 		if actual != test.expect {
 			t.Errorf("Test %d: Expected %s, found %s. Input was StripHTML(%s)", i, test.expect, actual, test.input)
 		}
@@ -231,19 +480,19 @@ func TestFileListing(t *testing.T) {
 			verifyErr: os.IsNotExist,
 		},
 	} {
-		context := getContextOrFail(t)
+		tplContext := getContextOrFail(t)
 		var dirPath string
 		var err error
 
 		// create files for test case
 		if test.fileNames != nil {
-			dirPath, err = ioutil.TempDir(fmt.Sprintf("%s", context.Root), "caddy_ctxtest")
+			dirPath, err = os.MkdirTemp(fmt.Sprintf("%s", tplContext.Root), "caddy_ctxtest")
 			if err != nil {
 				t.Fatalf("Test %d: Expected no error creating directory, got: '%s'", i, err.Error())
 			}
 			for _, name := range test.fileNames {
 				absFilePath := filepath.Join(dirPath, name)
-				if err = ioutil.WriteFile(absFilePath, []byte(""), os.ModePerm); err != nil {
+				if err = os.WriteFile(absFilePath, []byte(""), os.ModePerm); err != nil {
 					os.RemoveAll(dirPath)
 					t.Fatalf("Test %d: Expected no error creating file, got: '%s'", i, err.Error())
 				}
@@ -252,7 +501,7 @@ func TestFileListing(t *testing.T) {
 
 		// perform test
 		input := filepath.ToSlash(filepath.Join(filepath.Base(dirPath), test.inputBase))
-		actual, err := context.funcListFiles(input)
+		actual, err := tplContext.funcListFiles(input)
 		if err != nil {
 			if !test.shouldErr {
 				t.Errorf("Test %d: Expected no error, got: '%s'", i, err)
@@ -285,7 +534,7 @@ func TestFileListing(t *testing.T) {
 }
 
 func TestSplitFrontMatter(t *testing.T) {
-	context := getContextOrFail(t)
+	tplContext := getContextOrFail(t)
 
 	for i, test := range []struct {
 		input  string
@@ -346,7 +595,7 @@ title = "Welcome"
 			body:   "\n### Test",
 		},
 	} {
-		result, _ := context.funcSplitFrontMatter(test.input)
+		result, _ := tplContext.funcSplitFrontMatter(test.input)
 		if result.Meta["title"] != test.expect {
 			t.Errorf("Test %d: Expected %s, found %s. Input was SplitFrontMatter(%s)", i, test.expect, result.Meta["title"], test.input)
 		}
@@ -357,23 +606,23 @@ title = "Welcome"
 
 }
 
-func getContextOrFail(t *testing.T) templateContext {
-	context, err := initTestContext()
+func getContextOrFail(t *testing.T) TemplateContext {
+	tplContext, err := initTestContext()
 	if err != nil {
 		t.Fatalf("failed to prepare test context: %v", err)
 	}
-	return context
+	return tplContext
 }
 
-func initTestContext() (templateContext, error) {
+func initTestContext() (TemplateContext, error) {
 	body := bytes.NewBufferString("request body")
 	request, err := http.NewRequest("GET", "https://example.com/foo/bar", body)
 	if err != nil {
-		return templateContext{}, err
+		return TemplateContext{}, err
 	}
-	return templateContext{
+	return TemplateContext{
 		Root:       http.Dir(os.TempDir()),
 		Req:        request,
-		RespHeader: tplWrappedHeader{make(http.Header)},
+		RespHeader: WrappedHeader{make(http.Header)},
 	}, nil
 }

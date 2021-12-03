@@ -20,7 +20,6 @@ import (
 	"flag"
 	"fmt"
 	"io"
-	"io/ioutil"
 	"log"
 	"net"
 	"os"
@@ -49,7 +48,7 @@ func init() {
 }
 
 // Main implements the main function of the caddy command.
-// Call this if Caddy is to be the main() if your program.
+// Call this if Caddy is to be the main() of your program.
 func Main() {
 	switch len(os.Args) {
 	case 0:
@@ -94,7 +93,7 @@ func Main() {
 // the bytes in expect, or returns an error if it doesn't.
 func handlePingbackConn(conn net.Conn, expect []byte) error {
 	defer conn.Close()
-	confirmationBytes, err := ioutil.ReadAll(io.LimitReader(conn, 32))
+	confirmationBytes, err := io.ReadAll(io.LimitReader(conn, 32))
 	if err != nil {
 		return err
 	}
@@ -124,9 +123,9 @@ func loadConfig(configFile, adapterName string) ([]byte, string, error) {
 	var err error
 	if configFile != "" {
 		if configFile == "-" {
-			config, err = ioutil.ReadAll(os.Stdin)
+			config, err = io.ReadAll(os.Stdin)
 		} else {
-			config, err = ioutil.ReadFile(configFile)
+			config, err = os.ReadFile(configFile)
 		}
 		if err != nil {
 			return nil, "", fmt.Errorf("reading config file: %v", err)
@@ -140,7 +139,7 @@ func loadConfig(configFile, adapterName string) ([]byte, string, error) {
 		// plugged in, and if so, try using a default Caddyfile
 		cfgAdapter = caddyconfig.GetAdapter("caddyfile")
 		if cfgAdapter != nil {
-			config, err = ioutil.ReadFile("Caddyfile")
+			config, err = os.ReadFile("Caddyfile")
 			if os.IsNotExist(err) {
 				// okay, no default Caddyfile; pretend like this never happened
 				cfgAdapter = nil
@@ -185,7 +184,7 @@ func loadConfig(configFile, adapterName string) ([]byte, string, error) {
 			if warn.Directive != "" {
 				msg = fmt.Sprintf("%s: %s", warn.Directive, warn.Message)
 			}
-			fmt.Printf("[WARNING][%s] %s:%d: %s\n", adapterName, warn.File, warn.Line, msg)
+			caddy.Log().Warn(msg, zap.String("adapter", adapterName), zap.String("file", warn.File), zap.Int("line", warn.Line))
 		}
 		config = adaptedConfig
 	}
@@ -311,7 +310,7 @@ func (f Flags) Int(name string) int {
 
 // Float64 returns the float64 representation of the
 // flag given by name. It returns false if the flag
-// is not a float63 type. It panics if the flag is
+// is not a float64 type. It panics if the flag is
 // not in the flag set.
 func (f Flags) Float64(name string) float64 {
 	val, _ := strconv.ParseFloat(f.String(name), 64)
@@ -360,6 +359,11 @@ func loadEnvFromFile(envFile string) error {
 			return fmt.Errorf("setting environment variables: %v", err)
 		}
 	}
+
+	// Update the storage paths to ensure they have the proper
+	// value after loading a specified env file.
+	caddy.ConfigAutosavePath = filepath.Join(caddy.AppConfigDir(), "autosave.json")
+	caddy.DefaultStorage = &certmagic.FileStorage{Path: caddy.AppDataDir()}
 
 	return nil
 }
@@ -415,7 +419,7 @@ func printEnvironment() {
 	fmt.Printf("caddy.AppDataDir=%s\n", caddy.AppDataDir())
 	fmt.Printf("caddy.AppConfigDir=%s\n", caddy.AppConfigDir())
 	fmt.Printf("caddy.ConfigAutosavePath=%s\n", caddy.ConfigAutosavePath)
-	fmt.Printf("caddy.Version=%s\n", caddy.GoModule().Version)
+	fmt.Printf("caddy.Version=%s\n", CaddyVersion())
 	fmt.Printf("runtime.GOOS=%s\n", runtime.GOOS)
 	fmt.Printf("runtime.GOARCH=%s\n", runtime.GOARCH)
 	fmt.Printf("runtime.Compiler=%s\n", runtime.Compiler)
@@ -432,70 +436,21 @@ func printEnvironment() {
 	}
 }
 
-// moveStorage moves the old default dataDir to the new default dataDir.
-// TODO: This is TEMPORARY until the release candidates.
-func moveStorage() {
-	// get the home directory (the old way)
-	oldHome := os.Getenv("HOME")
-	if oldHome == "" && runtime.GOOS == "windows" {
-		drive := os.Getenv("HOMEDRIVE")
-		path := os.Getenv("HOMEPATH")
-		oldHome = drive + path
-		if drive == "" || path == "" {
-			oldHome = os.Getenv("USERPROFILE")
+// CaddyVersion returns a detailed version string, if available.
+func CaddyVersion() string {
+	goModule := caddy.GoModule()
+	ver := goModule.Version
+	if goModule.Sum != "" {
+		ver += " " + goModule.Sum
+	}
+	if goModule.Replace != nil {
+		ver += " => " + goModule.Replace.Path
+		if goModule.Replace.Version != "" {
+			ver += "@" + goModule.Replace.Version
+		}
+		if goModule.Replace.Sum != "" {
+			ver += " " + goModule.Replace.Sum
 		}
 	}
-	if oldHome == "" {
-		oldHome = "."
-	}
-	oldDataDir := filepath.Join(oldHome, ".local", "share", "caddy")
-
-	// nothing to do if old data dir doesn't exist
-	_, err := os.Stat(oldDataDir)
-	if os.IsNotExist(err) {
-		return
-	}
-
-	// nothing to do if the new data dir is the same as the old one
-	newDataDir := caddy.AppDataDir()
-	if oldDataDir == newDataDir {
-		return
-	}
-
-	logger := caddy.Log().Named("automigrate").With(
-		zap.String("old_dir", oldDataDir),
-		zap.String("new_dir", newDataDir))
-
-	logger.Info("beginning one-time data directory migration",
-		zap.String("details", "https://github.com/caddyserver/caddy/issues/2955"))
-
-	// if new data directory exists, avoid auto-migration as a conservative safety measure
-	_, err = os.Stat(newDataDir)
-	if !os.IsNotExist(err) {
-		logger.Error("new data directory already exists; skipping auto-migration as conservative safety measure",
-			zap.Error(err),
-			zap.String("instructions", "https://github.com/caddyserver/caddy/issues/2955#issuecomment-570000333"))
-		return
-	}
-
-	// construct the new data directory's parent folder
-	err = os.MkdirAll(filepath.Dir(newDataDir), 0700)
-	if err != nil {
-		logger.Error("unable to make new datadirectory - follow link for instructions",
-			zap.String("instructions", "https://github.com/caddyserver/caddy/issues/2955#issuecomment-570000333"),
-			zap.Error(err))
-		return
-	}
-
-	// folder structure is same, so just try to rename (move) it;
-	// this fails if the new path is on a separate device
-	err = os.Rename(oldDataDir, newDataDir)
-	if err != nil {
-		logger.Error("new data directory already exists; skipping auto-migration as conservative safety measure - follow link for instructions",
-			zap.String("instructions", "https://github.com/caddyserver/caddy/issues/2955#issuecomment-570000333"),
-			zap.Error(err))
-	}
-
-	logger.Info("successfully completed one-time migration of data directory",
-		zap.String("details", "https://github.com/caddyserver/caddy/issues/2955"))
+	return ver
 }

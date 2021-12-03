@@ -1,20 +1,4 @@
-// Copyright 2015 Matthew Holt and The Caddy Authors
-//
-// Licensed under the Apache License, Version 2.0 (the "License");
-// you may not use this file except in compliance with the License.
-// You may obtain a copy of the License at
-//
-//     http://www.apache.org/licenses/LICENSE-2.0
-//
-// Unless required by applicable law or agreed to in writing, software
-// distributed under the License is distributed on an "AS IS" BASIS,
-// WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
-// See the License for the specific language governing permissions and
-// limitations under the License.
-
-package fileserver
-
-const defaultBrowseTemplate = `<!DOCTYPE html>
+<!DOCTYPE html>
 <html>
 	<head>
 		<title>{{html .Name}}</title>
@@ -37,6 +21,10 @@ a {
 a:hover,
 h1 a:hover {
 	color: #319cff;
+}
+
+a:visited {
+	color: #800080;
 }
 
 header,
@@ -226,6 +214,55 @@ footer {
 		max-width: 100px;
 	}
 }
+
+@media (prefers-color-scheme: dark) {
+	body {
+		background-color: #101010;
+		color: #dddddd;
+	}
+
+	header {
+		background-color: #151515;
+	}
+
+	tbody tr:hover {
+		background-color: #252525;
+	}
+
+	header a,
+	th a {
+		color: #dddddd;
+	}
+
+	a {
+		color: #5796d1;
+		text-decoration: none;
+	}
+
+	a:hover,
+	h1 a:hover {
+		color: #62b2fd;
+	}
+
+	tr {
+		border-bottom: 1px dashed rgba(255, 255, 255, 0.12);
+	}
+
+	#up-arrow,
+	#down-arrow {
+		fill: #dddddd;
+	}
+
+	#filter {
+		background-color: #151515;
+		color: #ffffff;
+		border: 1px solid #212121;
+	}
+
+	.meta {
+		border-bottom: 1px solid #212121
+	}
+}
 </style>
 	</head>
 	<body onload='initFilter()'>
@@ -377,7 +414,7 @@ footer {
 		</footer>
 		<script>
 			var filterEl = document.getElementById('filter');
-			filterEl.focus();
+			filterEl.focus({ preventScroll: true });
 
 			function initFilter() {
 				if (!filterEl.value) {
@@ -424,4 +461,4 @@ footer {
 			timeList.forEach(localizeDatetime);
 		</script>
 	</body>
-</html>`
+</html>

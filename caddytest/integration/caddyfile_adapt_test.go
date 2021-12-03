@@ -1,7 +1,10 @@
 package integration
 
 import (
-	"io/ioutil"
+	jsonMod "encoding/json"
+	"fmt"
+	"os"
+	"path/filepath"
 	"regexp"
 	"strings"
 	"testing"
@@ -11,7 +14,7 @@ import (
 
 func TestCaddyfileAdaptToJSON(t *testing.T) {
 	// load the list of test files from the dir
-	files, err := ioutil.ReadDir("./caddyfile_adapt")
+	files, err := os.ReadDir("./caddyfile_adapt")
 	if err != nil {
 		t.Errorf("failed to read caddyfile_adapt dir: %s", err)
 	}
@@ -26,20 +29,25 @@ func TestCaddyfileAdaptToJSON(t *testing.T) {
 
 		// read the test file
 		filename := f.Name()
-		data, err := ioutil.ReadFile("./caddyfile_adapt/" + filename)
+		data, err := os.ReadFile("./caddyfile_adapt/" + filename)
 		if err != nil {
 			t.Errorf("failed to read %s dir: %s", filename, err)
 		}
 
 		// split the Caddyfile (first) and JSON (second) parts
+		// (append newline to Caddyfile to match formatter expectations)
 		parts := strings.Split(string(data), "----------")
-		caddyfile, json := strings.TrimSpace(parts[0]), strings.TrimSpace(parts[1])
+		caddyfile, json := strings.TrimSpace(parts[0])+"\n", strings.TrimSpace(parts[1])
 
 		// replace windows newlines in the json with unix newlines
 		json = winNewlines.ReplaceAllString(json, "\n")
 
+		// replace os-specific default path for file_server's hide field
+		replacePath, _ := jsonMod.Marshal(fmt.Sprint(".", string(filepath.Separator), "Caddyfile"))
+		json = strings.ReplaceAll(json, `"./Caddyfile"`, string(replacePath))
+
 		// run the test
-		ok := caddytest.CompareAdapt(t, caddyfile, "caddyfile", json)
+		ok := caddytest.CompareAdapt(t, filename, caddyfile, "caddyfile", json)
 		if !ok {
 			t.Errorf("failed to adapt %s", filename)
 		}

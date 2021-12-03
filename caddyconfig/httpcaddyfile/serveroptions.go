@@ -33,15 +33,16 @@ type serverOptions struct {
 	ListenerAddress string
 
 	// These will all map 1:1 to the caddyhttp.Server struct
-	ListenerWrappersRaw []json.RawMessage
-	ReadTimeout         caddy.Duration
-	ReadHeaderTimeout   caddy.Duration
-	WriteTimeout        caddy.Duration
-	IdleTimeout         caddy.Duration
-	MaxHeaderBytes      int
-	AllowH2C            bool
-	ExperimentalHTTP3   bool
-	StrictSNIHost       *bool
+	ListenerWrappersRaw  []json.RawMessage
+	ReadTimeout          caddy.Duration
+	ReadHeaderTimeout    caddy.Duration
+	WriteTimeout         caddy.Duration
+	IdleTimeout          caddy.Duration
+	MaxHeaderBytes       int
+	AllowH2C             bool
+	ExperimentalHTTP3    bool
+	StrictSNIHost        *bool
+	ShouldLogCredentials bool
 }
 
 func unmarshalCaddyfileServerOptions(d *caddyfile.Dispenser) (interface{}, error) {
@@ -57,21 +58,14 @@ func unmarshalCaddyfileServerOptions(d *caddyfile.Dispenser) (interface{}, error
 			switch d.Val() {
 			case "listener_wrappers":
 				for nesting := d.Nesting(); d.NextBlock(nesting); {
-					mod, err := caddy.GetModule("caddy.listeners." + d.Val())
-					if err != nil {
-						return nil, fmt.Errorf("finding listener module '%s': %v", d.Val(), err)
-					}
-					unm, ok := mod.New().(caddyfile.Unmarshaler)
-					if !ok {
-						return nil, fmt.Errorf("listener module '%s' is not a Caddyfile unmarshaler", mod)
-					}
-					err = unm.UnmarshalCaddyfile(d.NewFromNextSegment())
+					modID := "caddy.listeners." + d.Val()
+					unm, err := caddyfile.UnmarshalModule(d, modID)
 					if err != nil {
 						return nil, err
 					}
 					listenerWrapper, ok := unm.(caddy.ListenerWrapper)
 					if !ok {
-						return nil, fmt.Errorf("module %s is not a listener wrapper", mod)
+						return nil, fmt.Errorf("module %s (%T) is not a listener wrapper", modID, unm)
 					}
 					jsonListenerWrapper := caddyconfig.JSONModuleObject(
 						listenerWrapper,
@@ -140,6 +134,12 @@ func unmarshalCaddyfileServerOptions(d *caddyfile.Dispenser) (interface{}, error
 					return nil, d.Errf("parsing max_header_size: %v", err)
 				}
 				serverOpts.MaxHeaderBytes = int(size)
+
+			case "log_credentials":
+				if d.NextArg() {
+					return nil, d.ArgErr()
+				}
+				serverOpts.ShouldLogCredentials = true
 
 			case "protocol":
 				for nesting := d.Nesting(); d.NextBlock(nesting); {
@@ -229,6 +229,12 @@ func applyServerOptions(
 		server.AllowH2C = opts.AllowH2C
 		server.ExperimentalHTTP3 = opts.ExperimentalHTTP3
 		server.StrictSNIHost = opts.StrictSNIHost
+		if opts.ShouldLogCredentials {
+			if server.Logs == nil {
+				server.Logs = &caddyhttp.ServerLogConfig{}
+			}
+			server.Logs.ShouldLogCredentials = opts.ShouldLogCredentials
+		}
 	}
 
 	return nil

@@ -1,4 +1,4 @@
-// Copyright 2015 Light Code Labs, LLC
+// Copyright 2015 Matthew Holt and The Caddy Authors
 //
 // Licensed under the Apache License, Version 2.0 (the "License");
 // you may not use this file except in compliance with the License.
@@ -16,7 +16,8 @@ package caddyfile
 
 import (
 	"bytes"
-	"io/ioutil"
+	"fmt"
+	"io"
 	"log"
 	"os"
 	"path/filepath"
@@ -36,15 +37,43 @@ import (
 // Environment variables in {$ENVIRONMENT_VARIABLE} notation
 // will be replaced before parsing begins.
 func Parse(filename string, input []byte) ([]ServerBlock, error) {
-	tokens, err := allTokens(filename, input)
+	// unfortunately, we must copy the input because parsing must
+	// remain a read-only operation, but we have to expand environment
+	// variables before we parse, which changes the underlying array (#4422)
+	inputCopy := make([]byte, len(input))
+	copy(inputCopy, input)
+
+	tokens, err := allTokens(filename, inputCopy)
 	if err != nil {
 		return nil, err
 	}
-	p := parser{Dispenser: NewDispenser(tokens)}
+	p := parser{
+		Dispenser: NewDispenser(tokens),
+		importGraph: importGraph{
+			nodes: make(map[string]bool),
+			edges: make(adjacency),
+		},
+	}
 	return p.parseAll()
 }
 
+// allTokens lexes the entire input, but does not parse it.
+// It returns all the tokens from the input, unstructured
+// and in order. It may mutate input as it expands env vars.
+func allTokens(filename string, input []byte) ([]Token, error) {
+	inputCopy, err := replaceEnvVars(input)
+	if err != nil {
+		return nil, err
+	}
+	tokens, err := Tokenize(inputCopy, filename)
+	if err != nil {
+		return nil, err
+	}
+	return tokens, nil
+}
+
 // replaceEnvVars replaces all occurrences of environment variables.
+// It mutates the underlying array and returns the updated slice.
 func replaceEnvVars(input []byte) ([]byte, error) {
 	var offset int
 	for {
@@ -89,27 +118,13 @@ func replaceEnvVars(input []byte) ([]byte, error) {
 	return input, nil
 }
 
-// allTokens lexes the entire input, but does not parse it.
-// It returns all the tokens from the input, unstructured
-// and in order.
-func allTokens(filename string, input []byte) ([]Token, error) {
-	input, err := replaceEnvVars(input)
-	if err != nil {
-		return nil, err
-	}
-	tokens, err := Tokenize(input, filename)
-	if err != nil {
-		return nil, err
-	}
-	return tokens, nil
-}
-
 type parser struct {
 	*Dispenser
 	block           ServerBlock // current server block being parsed
 	eof             bool        // if we encounter a valid EOF in a hard place
 	definedSnippets map[string][]Token
 	nesting         int
+	importGraph     importGraph
 }
 
 func (p *parser) parseAll() ([]ServerBlock, error) {
@@ -165,6 +180,15 @@ func (p *parser) begin() error {
 		if err != nil {
 			return err
 		}
+		// Just as we need to track which file the token comes from, we need to
+		// keep track of which snippets do the tokens come from. This is helpful
+		// in tracking import cycles across files/snippets by namespacing them. Without
+		// this we end up with false-positives in cycle-detection.
+		for k, v := range tokens {
+			v.inSnippet = true
+			v.snippetName = name
+			tokens[k] = v
+		}
 		p.definedSnippets[name] = tokens
 		// empty block keys so we don't save this block as a real server.
 		p.block.Keys = nil
@@ -194,7 +218,18 @@ func (p *parser) addresses() error {
 			if expectingAnother {
 				return p.Errf("Expected another address but had '%s' - check for extra comma", tkn)
 			}
+			// Mark this server block as being defined with braces.
+			// This is used to provide a better error message when
+			// the user may have tried to define two server blocks
+			// without having used braces, which are required in
+			// that case.
+			p.block.HasBraces = true
 			break
+		}
+
+		// Users commonly forget to place a space between the address and the '{'
+		if strings.HasSuffix(tkn, "{") {
+			return p.Errf("Site addresses cannot end with a curly brace: '%s' - put a space between the token and the brace", tkn)
 		}
 
 		if tkn != "" { // empty token possible if user typed ""
@@ -205,6 +240,13 @@ func (p *parser) addresses() error {
 				expectingAnother = true
 			} else {
 				expectingAnother = false // but we may still see another one on this line
+			}
+
+			// If there's a comma here, it's probably because they didn't use a space
+			// between their two domains, e.g. "foo.com,bar.com", which would not be
+			// parsed as two separate site addresses.
+			if strings.Contains(tkn, ",") {
+				return p.Errf("Site addresses cannot contain a comma ',': '%s' - put a space after the comma to separate site addresses", tkn)
 			}
 
 			p.block.Keys = append(p.block.Keys, tkn)
@@ -304,7 +346,7 @@ func (p *parser) doImport() error {
 	args := p.RemainingArgs()
 
 	// add args to the replacer
-	repl := caddy.NewReplacer()
+	repl := caddy.NewEmptyReplacer()
 	for index, arg := range args {
 		repl.Set("args."+strconv.Itoa(index), arg)
 	}
@@ -314,10 +356,15 @@ func (p *parser) doImport() error {
 	tokensBefore := p.tokens[:p.cursor-1-len(args)]
 	tokensAfter := p.tokens[p.cursor+1:]
 	var importedTokens []Token
+	var nodes []string
 
 	// first check snippets. That is a simple, non-recursive replacement
 	if p.definedSnippets != nil && p.definedSnippets[importPattern] != nil {
 		importedTokens = p.definedSnippets[importPattern]
+		if len(importedTokens) > 0 {
+			// just grab the first one
+			nodes = append(nodes, fmt.Sprintf("%s:%s", importedTokens[0].File, importedTokens[0].snippetName))
+		}
 	} else {
 		// make path relative to the file of the _token_ being processed rather
 		// than current working directory (issue #867) and then use glob to get
@@ -353,7 +400,6 @@ func (p *parser) doImport() error {
 		}
 
 		// collect all the imported tokens
-
 		for _, importFile := range matches {
 			newTokens, err := p.doSingleImport(importFile)
 			if err != nil {
@@ -361,6 +407,18 @@ func (p *parser) doImport() error {
 			}
 			importedTokens = append(importedTokens, newTokens...)
 		}
+		nodes = matches
+	}
+
+	nodeName := p.File()
+	if p.Token().inSnippet {
+		nodeName += fmt.Sprintf(":%s", p.Token().snippetName)
+	}
+	p.importGraph.addNode(nodeName)
+	p.importGraph.addNodes(nodes)
+	if err := p.importGraph.addEdges(nodeName, nodes); err != nil {
+		p.importGraph.removeNodes(nodes)
+		return err
 	}
 
 	// copy the tokens so we don't overwrite p.definedSnippets
@@ -396,7 +454,7 @@ func (p *parser) doSingleImport(importFile string) ([]Token, error) {
 		return nil, p.Errf("Could not import %s: is a directory", importFile)
 	}
 
-	input, err := ioutil.ReadAll(file)
+	input, err := io.ReadAll(file)
 	if err != nil {
 		return nil, p.Errf("Could not read imported file %s: %v", importFile, err)
 	}
@@ -526,8 +584,9 @@ func (p *parser) snippetTokens() ([]Token, error) {
 // head of the server block with tokens, which are
 // grouped by segments.
 type ServerBlock struct {
-	Keys     []string
-	Segments []Segment
+	HasBraces bool
+	Keys      []string
+	Segments  []Segment
 }
 
 // DispenseDirective returns a dispenser that contains

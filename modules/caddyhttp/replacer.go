@@ -25,10 +25,10 @@ import (
 	"crypto/tls"
 	"crypto/x509"
 	"encoding/asn1"
+	"encoding/base64"
 	"encoding/pem"
 	"fmt"
 	"io"
-	"io/ioutil"
 	"net"
 	"net/http"
 	"net/textproto"
@@ -36,6 +36,7 @@ import (
 	"path"
 	"strconv"
 	"strings"
+	"time"
 
 	"github.com/caddyserver/caddy/v2"
 	"github.com/caddyserver/caddy/v2/modules/caddytls"
@@ -52,6 +53,8 @@ func NewTestReplacer(req *http.Request) *caddy.Replacer {
 }
 
 func addHTTPVarsToReplacer(repl *caddy.Replacer, req *http.Request, w http.ResponseWriter) {
+	SetVar(req.Context(), "start_time", time.Now())
+
 	httpVars := func(key string) (interface{}, bool) {
 		if req != nil {
 			// query string parameters
@@ -140,6 +143,9 @@ func addHTTPVarsToReplacer(repl *caddy.Replacer, req *http.Request, w http.Respo
 				return dir, true
 			case "http.request.uri.query":
 				return req.URL.RawQuery, true
+			case "http.request.duration":
+				start := GetVar(req.Context(), "start_time").(time.Time)
+				return time.Since(start), true
 			case "http.request.body":
 				if req.Body == nil {
 					return "", true
@@ -156,7 +162,7 @@ func addHTTPVarsToReplacer(repl *caddy.Replacer, req *http.Request, w http.Respo
 					return "", true
 				}
 				// replace real body with buffered data
-				req.Body = ioutil.NopCloser(buf)
+				req.Body = io.NopCloser(buf)
 				return buf.String(), true
 
 				// original request, before any internal changes
@@ -350,6 +356,8 @@ func getReqTLSReplacement(req *http.Request, key string) (interface{}, bool) {
 		case "client.certificate_pem_escaped":
 			block := pem.Block{Type: "CERTIFICATE", Bytes: cert.Raw}
 			return url.QueryEscape(string(pem.EncodeToMemory(&block))), true
+		case "client.certificate_der_base64":
+			return base64.StdEncoding.EncodeToString(cert.Raw), true
 		default:
 			return nil, false
 		}

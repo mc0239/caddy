@@ -17,12 +17,31 @@ package fileserver
 import (
 	"net/http"
 	"net/url"
+	"os"
+	"runtime"
 	"testing"
 
 	"github.com/caddyserver/caddy/v2/modules/caddyhttp"
 )
 
 func TestFileMatcher(t *testing.T) {
+
+	// Windows doesn't like colons in files names
+	isWindows := runtime.GOOS == "windows"
+	if !isWindows {
+		filename := "with:in-name.txt"
+		f, err := os.Create("./testdata/" + filename)
+		if err != nil {
+			t.Fail()
+			return
+		}
+		t.Cleanup(func() {
+			os.Remove("./testdata/" + filename)
+		})
+		f.WriteString(filename)
+		f.Close()
+	}
+
 	for i, tc := range []struct {
 		path         string
 		expectedPath string
@@ -63,6 +82,30 @@ func TestFileMatcher(t *testing.T) {
 			path:    "/missingfile.php",
 			matched: false,
 		},
+		{
+			path:         "ملف.txt", // the path file name is not escaped
+			expectedPath: "ملف.txt",
+			expectedType: "file",
+			matched:      true,
+		},
+		{
+			path:         url.PathEscape("ملف.txt"), // singly-escaped path
+			expectedPath: "ملف.txt",
+			expectedType: "file",
+			matched:      true,
+		},
+		{
+			path:         url.PathEscape(url.PathEscape("ملف.txt")), // doubly-escaped path
+			expectedPath: "%D9%85%D9%84%D9%81.txt",
+			expectedType: "file",
+			matched:      true,
+		},
+		{
+			path:         "./with:in-name.txt", // browsers send the request with the path as such
+			expectedPath: "with:in-name.txt",
+			expectedType: "file",
+			matched:      !isWindows,
+		},
 	} {
 		m := &MatchFile{
 			Root:     "./testdata",
@@ -94,7 +137,7 @@ func TestFileMatcher(t *testing.T) {
 			t.Fatalf("Test %d: actual path: %v, expected: %v", i, rel, tc.expectedPath)
 		}
 
-		fileType, ok := repl.Get("http.matchers.file.type")
+		fileType, _ := repl.Get("http.matchers.file.type")
 		if fileType != tc.expectedType {
 			t.Fatalf("Test %d: actual file type: %v, expected: %v", i, fileType, tc.expectedType)
 		}
@@ -197,7 +240,7 @@ func TestPHPFileMatcher(t *testing.T) {
 			t.Fatalf("Test %d: actual path: %v, expected: %v", i, rel, tc.expectedPath)
 		}
 
-		fileType, ok := repl.Get("http.matchers.file.type")
+		fileType, _ := repl.Get("http.matchers.file.type")
 		if fileType != tc.expectedType {
 			t.Fatalf("Test %d: actual file type: %v, expected: %v", i, fileType, tc.expectedType)
 		}

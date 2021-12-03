@@ -26,10 +26,15 @@ func init() {
 }
 
 // PKI provides Public Key Infrastructure facilities for Caddy.
+//
+// This app can define certificate authorities (CAs) which are capable
+// of signing certificates. Other modules can be configured to use
+// the CAs defined by this app for issuing certificates or getting
+// key information needed for establishing trust.
 type PKI struct {
-	// The CAs to manage. Each CA is keyed by an ID that is used
-	// to uniquely identify it from other CAs. The default CA ID
-	// is "local".
+	// The certificate authorities to manage. Each CA is keyed by an
+	// ID that is used to uniquely identify it from other CAs.
+	// The default CA ID is "local".
 	CAs map[string]*CA `json:"certificate_authorities,omitempty"`
 
 	ctx caddy.Context
@@ -49,10 +54,14 @@ func (p *PKI) Provision(ctx caddy.Context) error {
 	p.ctx = ctx
 	p.log = ctx.Logger(p)
 
-	// if this app is initialized at all, ensure there's
-	// at least a default CA that can be used
-	if len(p.CAs) == 0 {
-		p.CAs = map[string]*CA{DefaultCAID: new(CA)}
+	// if this app is initialized at all, ensure there's at
+	// least a default CA that can be used: the standard CA
+	// which is used implicitly for signing local-use certs
+	if p.CAs == nil {
+		p.CAs = make(map[string]*CA)
+	}
+	if _, ok := p.CAs[DefaultCAID]; !ok {
+		p.CAs[DefaultCAID] = new(CA)
 	}
 
 	for caID, ca := range p.CAs {

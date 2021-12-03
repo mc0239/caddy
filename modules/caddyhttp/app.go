@@ -49,6 +49,7 @@ func init() {
 // ------------|---------------
 // `{http.request.body}` | The request body (⚠️ inefficient; use only for debugging)
 // `{http.request.cookie.*}` | HTTP request cookie
+// `{http.request.duration}` | Time up to now spent handling the request (after decoding headers from client)
 // `{http.request.header.*}` | Specific request header field
 // `{http.request.host.labels.*}` | Request host labels (0-based from right); e.g. for foo.example.com: 0=com, 1=example, 2=foo
 // `{http.request.host}` | The host part of the request's Host header
@@ -77,6 +78,7 @@ func init() {
 // `{http.request.tls.client.public_key_sha256}` | The SHA256 checksum of the client's public key.
 // `{http.request.tls.client.certificate_pem}` | The PEM-encoded value of the certificate.
 // `{http.request.tls.client.certificate_pem_escaped}` | The query-escaped PEM-encoded value of the certificate.
+// `{http.request.tls.client.certificate_der_base64}` | The base64-encoded value of the certificate.
 // `{http.request.tls.client.issuer}` | The issuer DN of the client certificate
 // `{http.request.tls.client.serial}` | The serial number of the client certificate
 // `{http.request.tls.client.subject}` | The subject DN of the client certificate
@@ -177,8 +179,8 @@ func (app *App) Provision(ctx caddy.Context) error {
 		// domain fronting is desired and access is not restricted
 		// based on hostname
 		if srv.StrictSNIHost == nil && srv.hasTLSClientAuth() {
-			app.logger.Info("enabling strict SNI-Host matching because TLS client auth is configured",
-				zap.String("server_name", srvName),
+			app.logger.Warn("enabling strict SNI-Host enforcement because TLS client auth is configured",
+				zap.String("server_id", srvName),
 			)
 			trueBool := true
 			srv.StrictSNIHost = &trueBool
@@ -284,7 +286,6 @@ func (app *App) Validate() error {
 			}
 		}
 	}
-
 	return nil
 }
 

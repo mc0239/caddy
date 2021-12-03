@@ -180,6 +180,11 @@ d {
 }`,
 		},
 		{
+			description: "env var placeholders with port",
+			input:       `:{$PORT}`,
+			expect:      `:{$PORT}`,
+		},
+		{
 			description: "comments",
 			input: `#a "\n"
 
@@ -320,6 +325,44 @@ baz`,
 {
 	foo
 }`,
+		},
+		{
+			description: "matthewpi/vscode-caddyfile-support#13",
+			input: `{
+	email {$ACMEEMAIL}
+	#debug
+}
+
+block {
+}
+`,
+			expect: `{
+	email {$ACMEEMAIL}
+	#debug
+}
+
+block {
+}
+`,
+		},
+		{
+			description: "matthewpi/vscode-caddyfile-support#13 - bad formatting",
+			input: `{
+	email {$ACMEEMAIL}
+	#debug
+	}
+
+	block {
+	}
+`,
+			expect: `{
+	email {$ACMEEMAIL}
+	#debug
+}
+
+block {
+}
+`,
 		},
 	} {
 		// the formatter should output a trailing newline,
